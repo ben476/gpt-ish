@@ -7,7 +7,7 @@ import torch
 
 from llama.tokenizer import Tokenizer
 from llama.model import Transformer
-
+import time
 
 class LLaMA:
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
@@ -64,6 +64,72 @@ class LLaMA:
                 pass
             decoded.append(self.tokenizer.decode(t))
         return decoded
+
+    def probs_stream(
+        self,
+        text: str,
+        max_gen_len: int,
+        temperature: float = 0.8,
+        top_p: float = 0.95,
+    ):
+        params = self.model.params
+        print("params", params)
+
+        start = time.time()
+
+        prompt_tokens = [self.tokenizer.encode(text, bos=True, eos=False)]
+
+        window_size = int(9 * params.max_seq_len / 10)
+
+        print("window_size", window_size)
+        print("len(prompt_tokens[0])", len(prompt_tokens[0]))
+
+        decoded_tokens = []
+
+        yield self.tokenizer.decode([prompt_tokens[0][0]]), self.tokenizer.decode([prompt_tokens[0][0]]), 1, 1, {}
+
+        for i in range(0, len(prompt_tokens[0]), params.max_seq_len - window_size):
+            print("i", i)
+            tokens = torch.tensor([prompt_tokens[0][i: i + params.max_seq_len]]).cuda().long()
+
+            print("tokenising took", time.time() - start)
+
+            input_text_mask = tokens != self.tokenizer.pad_id
+            start_pos = 1 if i == 0 else window_size
+            prev_pos = 0
+
+            print("start_pos", start_pos)
+            print("len(prompt_tokens[0])", len(prompt_tokens[0]))
+
+            for cur_pos in range(start_pos, min(params.max_seq_len, len(prompt_tokens[0]) - i)):
+                last_tokens = tokens[:, -params.max_seq_len:]
+                logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+
+                probs = torch.softmax(logits / temperature, dim=-1)
+                next_token = torch.argmax(logits, dim=-1)
+                
+                next_token = next_token.reshape(-1)
+                
+                sorted_probs, sorted_indices = torch.sort(probs[0], descending=True)
+
+                prev_decode_len = len(self.tokenizer.decode(decoded_tokens))
+
+                decoded_tokens.append(int(tokens[0][cur_pos]))
+
+                decoded = self.tokenizer.decode(decoded_tokens)
+                new_decoded = decoded[prev_decode_len:]
+                prev_pos = cur_pos
+
+                token = self.tokenizer.decode([int(tokens[0][cur_pos])])
+                word = new_decoded
+                probability = probs[0][tokens[0][cur_pos]]
+                place = torch.where(sorted_indices == int(tokens[0][cur_pos]))[0]
+                top5 = {
+                    self.tokenizer.decode([int(sorted_indices[i])]): float(sorted_probs[i])
+                    for i in range(5)
+                }
+
+                yield token, word, float(probability), int(place), top5
 
 
 def sample_top_p(probs, p):
